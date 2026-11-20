@@ -1,7 +1,7 @@
 // Service worker: luu san app de mo duoc ca khi khong co mang (trong xe)
 // Doi so phien ban khi sua file de dien thoai cap nhat.
-const CACHE = 'vf2-eq-v1';
-const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png'];
+const CACHE = 'vf2-eq-v2';
+const FILES = ['./', './index.html', './manifest.webmanifest', './logo.png', './icon-192.png', './icon-512.png', './icon-maskable-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
