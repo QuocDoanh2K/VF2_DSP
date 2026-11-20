@@ -61,6 +61,16 @@ canvas{width:100%;height:110px;display:block;margin-bottom:6px}
 .switch input{width:20px;height:20px;accent-color:var(--acc)}
 .msg{font-size:12px;color:var(--mut);margin-top:10px;line-height:1.5}
 .msg b{color:var(--txt)}
+.opts{margin-top:10px;padding:2px 12px}
+.opt{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0}
+.opt + .opt{border-top:1px solid var(--line)}
+.opt b{display:block;font-size:14px;font-weight:600}
+.opt small{display:block;font-size:12px;color:var(--mut);line-height:1.4;margin-top:2px}
+.tg{-webkit-appearance:none;appearance:none;flex:none;width:48px;height:28px;border-radius:999px;background:#2b3644;position:relative;margin:0;transition:background .15s}
+.tg::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;transition:transform .15s}
+.tg:checked{background:#1f9d55}
+.tg:checked::after{transform:translateX(20px)}
+.tg:disabled{opacity:.4}
 .off .eq,.off canvas{opacity:.45}
 @media (min-width:600px){.val,.lab{font-size:11px}}
 </style>
@@ -84,6 +94,18 @@ canvas{width:100%;height:110px;display:block;margin-bottom:6px}
   <div class="scale"><span>+12 dB</span><span>0</span><span>−12 dB</span></div>
 </div>
 
+<div class="panel opts" id="opts">
+  <label class="opt">
+    <span><b>Giảm nhỏ nhạc khi mở cửa</b><small>Bật: mở cửa xe thì nhạc tự nhỏ lại. Vào số R luôn tự nhỏ, không phụ thuộc cài đặt này.</small></span>
+    <input type="checkbox" class="tg" id="swDoor" disabled>
+  </label>
+  <label class="opt">
+    <span><b>Chuyển bài bằng phím UP / DOWN</b><small>Bật: DOWN = bài kế, UP = bài trước (NEXT/BACK không chuyển bài). Tắt: NEXT = bài kế, BACK = bài trước.</small></span>
+    <input type="checkbox" class="tg" id="swNav" disabled>
+  </label>
+</div>
+<div class="msg" id="optNote" hidden></div>
+
 <div class="row" style="margin-top:10px">
   <button class="pri grow" id="btnInstall" hidden>Cài đặt ứng dụng</button>
 </div>
@@ -93,6 +115,7 @@ canvas{width:100%;height:110px;display:block;margin-bottom:6px}
 /* ====== Cấu hình: PHẢI khớp với firmware (BLE.cpp, DSP.cpp) ====== */
 const SERVICE = '7c8f0001-3b1e-4a52-9d6a-2f5e8b1c0001';
 const CHAR    = '7c8f0002-3b1e-4a52-9d6a-2f5e8b1c0001';
+const SET_CHAR = '7c8f0003-3b1e-4a52-9d6a-2f5e8b1c0001';   // cài đặt: [giảm nhạc khi mở cửa, đổi phím chuyển bài]
 const N = 15, FS = 44100, Q = 2.14, GMAX = 24;              // gain tính theo 0.5 dB: -24..+24
 const FREQ  = [25,40,63,100,160,250,400,630,1000,1600,2500,4000,6300,10000,16000];
 const LABEL = ['25','40','63','100','160','250','400','630','1k','1.6k','2.5k','4k','6.3k','10k','16k'];
@@ -114,7 +137,7 @@ const PRESETS = [   // 25  40  63 100 160 250 400 630  1k 1.6k 2.5k 4k 6.3k 10k 
 
 /* ====== Trạng thái ====== */
 let gains = new Array(N).fill(0), eqOn = true;
-let device = null, chr = null, connected = false, userTouchAt = 0;
+let device = null, chr = null, setChr = null, connected = false, userTouchAt = 0;
 const $ = id => document.getElementById(id);
 
 /* ====== Dựng giao diện ====== */
@@ -218,6 +241,10 @@ function drawCurve() {
 }
 addEventListener('resize', drawCurve);
 
+/* ====== Hàng đợi GATT: Web Bluetooth không cho 2 thao tác chạy chồng nhau ====== */
+let gattChain = Promise.resolve();
+function gatt(fn) { const r = gattChain.then(fn); gattChain = r.catch(() => {}); return r; }
+
 /* ====== Gửi (gộp thay đổi, mỗi lần chỉ 1 lệnh ghi đang chạy) ====== */
 let sending = false, dirty = false;
 function packet() {
@@ -233,14 +260,38 @@ async function pump() {
     dirty = false;
     if (!connected || !chr) break;
     try {
-      if (chr.writeValueWithoutResponse) await chr.writeValueWithoutResponse(packet());
-      else await chr.writeValue(packet());
+      await gatt(() => chr.writeValueWithoutResponse ? chr.writeValueWithoutResponse(packet()) : chr.writeValue(packet()));
     } catch (e) { console.warn('ghi lỗi', e); dirty = connected; }
     await new Promise(r => setTimeout(r, 45));                          // ~20 lần/giây là đủ mượt
   }
   sending = false;
 }
 $('chkOn').onchange = e => { eqOn = e.target.checked; render(); queueSend(); };
+
+/* ====== Cài đặt xe (giảm nhạc khi mở cửa, đổi phím chuyển bài) ====== */
+function refreshOpts() {
+  const ok = connected && !!setChr;
+  $('swDoor').disabled = $('swNav').disabled = !ok;
+  const n = $('optNote');
+  if (connected && !setChr) { n.hidden = false; n.textContent = 'Firmware của thiết bị chưa hỗ trợ các cài đặt này. Hãy nạp lại bản firmware mới.'; }
+  else n.hidden = true;
+}
+function applySettings(dv) {
+  if (dv.byteLength < 2) return;
+  $('swDoor').checked = (dv.getUint8(0) & 1) === 1;
+  $('swNav').checked  = (dv.getUint8(1) & 1) === 1;
+}
+async function sendSettings() {
+  if (!setChr) return;
+  const p = new Uint8Array([$('swDoor').checked ? 1 : 0, $('swNav').checked ? 1 : 0]);
+  try { await gatt(() => setChr.writeValue(p)); }
+  catch (e) {                                                          // lỗi: đọc lại trạng thái thật từ thiết bị
+    console.warn('ghi cài đặt lỗi', e);
+    try { applySettings(await gatt(() => setChr.readValue())); } catch (_) {}
+  }
+}
+$('swDoor').onchange = sendSettings;
+$('swNav').onchange = sendSettings;
 
 /* ====== Bluetooth (Web Bluetooth) ====== */
 function applyPacket(dv) {
@@ -254,8 +305,10 @@ function setStatus(on, text) {
   connected = on; $('dot').classList.toggle('on', on); $('stt').textContent = text;
   $('btnConn').textContent = on ? 'Ngắt kết nối' : 'Kết nối thiết bị';
   $('btnConn').classList.toggle('disc', on);
+  refreshOpts();
 }
 async function connectGatt() {
+  setChr = null;
   setStatus(false, 'Đang kết nối…');
   const srv = await device.gatt.connect();
   const svc = await srv.getPrimaryService(SERVICE);
@@ -263,6 +316,14 @@ async function connectGatt() {
   chr.addEventListener('characteristicvaluechanged', onNotify);
   await chr.startNotifications();
   applyPacket(await chr.readValue());
+  setChr = null;
+  try {                                                              // firmware cũ không có kênh này: EQ vẫn dùng bình thường
+    const sc = await svc.getCharacteristic(SET_CHAR);
+    sc.addEventListener('characteristicvaluechanged', e => applySettings(e.target.value));
+    await sc.startNotifications();
+    applySettings(await sc.readValue());
+    setChr = sc;
+  } catch (e) { console.warn('Không có kênh cài đặt', e); }
   setStatus(true, 'Đã kết nối · ' + (device.name || 'VF2'));
 }
 async function onDisc() {
